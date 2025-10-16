@@ -6,227 +6,228 @@
 #include <string.h>
 
 // Para alterar o número de APPs (3 a 6), alterar esse #define abaixo
-#define NUM_APPS 6
+#define NUM_APLICACOES 3
 
-typedef enum { READY, RUNNING, BLOCKED, TERMINATED } ProcessState;
+// Estados de um processo
+typedef enum { PRONTO, EXECUTANDO, BLOQUEADO, TERMINADO } EstadoProcesso;
 
 typedef struct {
     pid_t pid;
-    ProcessState state;
-    int pc;
+    EstadoProcesso estado;
+    int pc; // Program Counter
     int pipe_fd[2];
-} PCB;
+} BCP;
 
-PCB process_table[NUM_APPS];
-pid_t inter_controller_pid;
+BCP tabela_processos[NUM_APLICACOES];
+pid_t pid_controlador_interrupcao;
 
-int ready_queue[NUM_APPS];
-int ready_head = 0, ready_tail = 0;
-int ready_queue_count = 0;
+int fila_prontos[NUM_APLICACOES];
+int ini_fila_prontos = 0, fim_fila_prontos = 0;
+int cont_fila_prontos = 0;
 
-int blocked_queue[NUM_APPS];
-int blocked_head = 0, blocked_tail = 0;
-int blocked_queue_count = 0;
+int fila_bloqueados[NUM_APLICACOES];
+int ini_fila_bloqueados = 0, fim_fila_bloqueados = 0;
+int cont_fila_bloqueados = 0;
 
-int running_app_index = -1;
+int indice_app_executando = -1;
 
-void scheduler();
-void check_all_terminated();
+void escalonador();
+void verificar_termino_total();
 
 // --- Funções de Fila ---
-void enqueue_ready(int app_index) {
-    if (ready_queue_count < NUM_APPS) {
-        ready_queue[ready_tail] = app_index;
-        ready_tail = (ready_tail + 1) % NUM_APPS;
-        ready_queue_count++;
+void enfileirar_pronto(int indice_app) {
+    if (cont_fila_prontos < NUM_APLICACOES) {
+        fila_prontos[fim_fila_prontos] = indice_app;
+        fim_fila_prontos = (fim_fila_prontos + 1) % NUM_APLICACOES;
+        cont_fila_prontos++;
     }
 }
-int dequeue_ready() {
-    if (ready_queue_count > 0) {
-        int app_index = ready_queue[ready_head];
-        ready_head = (ready_head + 1) % NUM_APPS;
-        ready_queue_count--;
-        return app_index;
+int desenfileirar_pronto() {
+    if (cont_fila_prontos > 0) {
+        int indice_app = fila_prontos[ini_fila_prontos];
+        ini_fila_prontos = (ini_fila_prontos + 1) % NUM_APLICACOES;
+        cont_fila_prontos--;
+        return indice_app;
     }
     return -1;
 }
-void enqueue_blocked(int app_index) {
-    if (blocked_queue_count < NUM_APPS) {
-        blocked_queue[blocked_tail] = app_index;
-        blocked_tail = (blocked_tail + 1) % NUM_APPS;
-        blocked_queue_count++;
+void enfileirar_bloqueado(int indice_app) {
+    if (cont_fila_bloqueados < NUM_APLICACOES) {
+        fila_bloqueados[fim_fila_bloqueados] = indice_app;
+        fim_fila_bloqueados = (fim_fila_bloqueados + 1) % NUM_APLICACOES;
+        cont_fila_bloqueados++;
     }
 }
-int dequeue_blocked() {
-    if (blocked_queue_count > 0) {
-        int app_index = blocked_queue[blocked_head];
-        blocked_head = (blocked_head + 1) % NUM_APPS;
-        blocked_queue_count--;
-        return app_index;
+int desenfileirar_bloqueado() {
+    if (cont_fila_bloqueados > 0) {
+        int indice_app = fila_bloqueados[ini_fila_bloqueados];
+        ini_fila_bloqueados = (ini_fila_bloqueados + 1) % NUM_APLICACOES;
+        cont_fila_bloqueados--;
+        return indice_app;
     }
     return -1;
 }
 
 // --- Handlers de Sinais ---
 
-void handle_child_exit(int signum) {
+void handler_termino_filho(int signum) {
     int status;
     pid_t pid;
 
-    // Loop para coletar todos os filhos que possam ter terminado
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
-        for (int i = 0; i < NUM_APPS; i++) {
-            if (process_table[i].pid == pid) {
+        for (int i = 0; i < NUM_APLICACOES; i++) {
+            if (tabela_processos[i].pid == pid) {
                 printf("\nKERNEL: APP %d (PID %d) terminou. Removendo do escalonamento.\n", i + 1, pid);
-                process_table[i].state = TERMINATED;
+                tabela_processos[i].estado = TERMINADO;
 
-                // Se o processo que terminou era o que estava rodando, chama o escalonador
-                if (running_app_index == i) {
-                    running_app_index = -1;
-                    scheduler();
+                if (indice_app_executando == i) {
+                    indice_app_executando = -1;
+                    escalonador();
                 }
                 break;
             }
         }
     }
-    check_all_terminated();
+    verificar_termino_total();
 }
 
-
-void handle_irq0(int signum) {
-    if (running_app_index == -1) return;
+void handler_irq0(int signum) { // Timeslice
+    if (indice_app_executando == -1) return;
     
-    printf("\nKERNEL: IRQ0 (Timeslice)! Parando APP %d (PID %d).\n", running_app_index + 1, process_table[running_app_index].pid);
-    kill(process_table[running_app_index].pid, SIGSTOP);
+    printf("\nKERNEL: IRQ0 (Timeslice)! Parando APP %d (PID %d).\n", indice_app_executando + 1, tabela_processos[indice_app_executando].pid);
+    kill(tabela_processos[indice_app_executando].pid, SIGSTOP);
     
-    process_table[running_app_index].state = READY;
-    enqueue_ready(running_app_index);
-    running_app_index = -1;
+    tabela_processos[indice_app_executando].estado = PRONTO;
+    enfileirar_pronto(indice_app_executando);
+    indice_app_executando = -1;
     
-    scheduler();
+    escalonador();
 }
 
-void handle_syscall(int signum) {
-    if (running_app_index == -1) return;
+void handler_syscall(int signum) { // Syscall de E/S
+    if (indice_app_executando == -1) return;
     
-    int app_idx = running_app_index;
-    PCB* pcb = &process_table[app_idx];
+    int indice_app = indice_app_executando;
+    BCP* bcp = &tabela_processos[indice_app];
     
-    read(pcb->pipe_fd[0], &pcb->pc, sizeof(pcb->pc));
+    read(bcp->pipe_fd[0], &bcp->pc, sizeof(bcp->pc));
 
-    printf("\nKERNEL: SYSCALL da APP %d (PID %d) no PC=%d. Bloqueando.\n", app_idx + 1, pcb->pid, pcb->pc);
-    kill(pcb->pid, SIGSTOP);
+    printf("\nKERNEL: SYSCALL da APP %d (PID %d) no PC=%d. Bloqueando.\n", indice_app + 1, bcp->pid, bcp->pc);
+    kill(bcp->pid, SIGSTOP);
 
-    pcb->state = BLOCKED;
-    enqueue_blocked(app_idx);
-    running_app_index = -1;
+    bcp->estado = BLOQUEADO;
+    enfileirar_bloqueado(indice_app);
+    indice_app_executando = -1;
 
-    if (blocked_queue_count == 1) {
+    if (cont_fila_bloqueados == 1) {
         printf("KERNEL: Dispositivo de E/S estava livre. Acionando InterController.\n");
-        kill(inter_controller_pid, SIGUSR2);
+        kill(pid_controlador_interrupcao, SIGUSR2);
     }
     
-    scheduler();
+    escalonador();
 }
 
-void handle_irq1(int signum) {
-    if (blocked_queue_count == 0) return;
+void handler_irq1(int signum) { // Conclusão de E/S
+    if (cont_fila_bloqueados == 0) return;
 
-    int app_idx = dequeue_blocked();
-    //Verifica se o processo não terminou enquanto estava bloqueado
-    if (process_table[app_idx].state != TERMINATED) {
-        process_table[app_idx].state = READY;
-        enqueue_ready(app_idx);
-        printf("\nKERNEL: IRQ1 (E/S Concluída) para APP %d. Movida para Prontos.\n", app_idx + 1);
+    int indice_app = desenfileirar_bloqueado();
+    if (tabela_processos[indice_app].estado != TERMINADO) {
+        tabela_processos[indice_app].estado = PRONTO;
+        enfileirar_pronto(indice_app);
+        printf("\nKERNEL: IRQ1 (E/S Concluída) para APP %d. Movida para Prontos.\n", indice_app + 1);
     }
     
-    if (blocked_queue_count > 0) {
+    if (cont_fila_bloqueados > 0) {
         printf("KERNEL: Acionando InterController para o próximo da fila de E/S.\n");
-        kill(inter_controller_pid, SIGUSR2);
+        kill(pid_controlador_interrupcao, SIGUSR2);
     }
 
-    scheduler();
+    escalonador();
 }
 
 // --- Escalonador ---
-void scheduler() {
-    if (running_app_index != -1 || ready_queue_count == 0) {
+void escalonador() {
+    if (indice_app_executando != -1 || cont_fila_prontos == 0) {
         return; 
     }
 
-    int dequeued_index = dequeue_ready();
+    int indice_desenfileirado = desenfileirar_pronto();
 
-    // Se o processo retirado da fila já terminou, tenta o próximo
-    if (process_table[dequeued_index].state == TERMINATED) {
-        scheduler(); // Chama o escalonador recursivamente para pegar o próximo
+    if (tabela_processos[indice_desenfileirado].estado == TERMINADO) {
+        escalonador();
         return;
     }
 
-    running_app_index = dequeued_index;
-    process_table[running_app_index].state = RUNNING;
+    indice_app_executando = indice_desenfileirado;
+    tabela_processos[indice_app_executando].estado = EXECUTANDO;
     
-    printf("KERNEL: Escalonador -> Executando APP %d (PID %d).\n\n", running_app_index + 1, process_table[running_app_index].pid);
-    kill(process_table[running_app_index].pid, SIGCONT);
+    printf("KERNEL: Escalonador -> Executando APP %d (PID %d).\n\n", indice_app_executando + 1, tabela_processos[indice_app_executando].pid);
+    kill(tabela_processos[indice_app_executando].pid, SIGCONT);
 }
 
-// Encerrar a simulação
-void check_all_terminated() {
-    int terminated_count = 0;
-    for (int i = 0; i < NUM_APPS; i++) {
-        if (process_table[i].state == TERMINATED) {
-            terminated_count++;
+// --- Finalização ---
+void verificar_termino_total() {
+    int cont_terminados = 0;
+    for (int i = 0; i < NUM_APLICACOES; i++) {
+        if (tabela_processos[i].estado == TERMINADO) {
+            cont_terminados++;
         }
     }
-    if (terminated_count == NUM_APPS) {
+    if (cont_terminados == NUM_APLICACOES) {
         printf("\nKERNEL: Todos os processos de aplicação terminaram. Encerrando simulação.\n");
-        // Mata o processo InterController para limpar tudo
-        kill(inter_controller_pid, SIGKILL);
+        kill(pid_controlador_interrupcao, SIGKILL);
         exit(0);
     }
 }
-
 
 // --- Função Principal ---
 int main() {
     printf("KERNEL (PID %d): Iniciando sistema...\n", getpid());
     
-    signal(SIGUSR1, handle_irq0);
-    signal(SIGUSR2, handle_syscall);
-    signal(SIGALRM, handle_irq1);
-    signal(SIGCHLD, handle_child_exit);
+    signal(SIGUSR1, handler_irq0);
+    signal(SIGUSR2, handler_syscall);
+    signal(SIGALRM, handler_irq1);
+    signal(SIGCHLD, handler_termino_filho);
 
-    inter_controller_pid = fork();
-    if (inter_controller_pid == 0) {
-        char kernel_pid_str[10];
-        sprintf(kernel_pid_str, "%d", getppid());
-        execlp("./inter_controller", "inter_controller", kernel_pid_str, NULL);
+    int tempos_syscall[NUM_APLICACOES] = {3, 0, 6}; 
+
+    pid_controlador_interrupcao = fork();
+    if (pid_controlador_interrupcao == 0) {
+        char pid_kernel_str[10];
+        sprintf(pid_kernel_str, "%d", getppid());
+        execlp("./inter_controller", "inter_controller", pid_kernel_str, NULL);
         perror("execlp controller"); exit(1);
     }
 
-    for (int i = 0; i < NUM_APPS; i++) {
-        pipe(process_table[i].pipe_fd);
-        process_table[i].pid = fork();
+    for (int i = 0; i < NUM_APLICACOES; i++) {
+        pipe(tabela_processos[i].pipe_fd);
+        tabela_processos[i].pid = fork();
         
-        if (process_table[i].pid == 0) {
-            close(process_table[i].pipe_fd[0]);
-            char id_str[3], kernel_pid_str[10], pipe_str[10];
+        if (tabela_processos[i].pid == 0) {
+            close(tabela_processos[i].pipe_fd[0]);
+            
+            char id_str[3], pid_kernel_str[10], pipe_str[10], tempo_syscall_str[10];
+            
             sprintf(id_str, "%d", i + 1);
-            sprintf(kernel_pid_str, "%d", getppid());
-            sprintf(pipe_str, "%d", process_table[i].pipe_fd[1]);
-            execlp("./application", "application", id_str, kernel_pid_str, pipe_str, NULL);
+            sprintf(pid_kernel_str, "%d", getppid());
+            sprintf(pipe_str, "%d", tabela_processos[i].pipe_fd[1]);
+            sprintf(tempo_syscall_str, "%d", tempos_syscall[i]);
+
+            execlp("./application", "application", id_str, pid_kernel_str, pipe_str, tempo_syscall_str, NULL);
+            
             perror("execlp application"); exit(1);
         } else {
-            close(process_table[i].pipe_fd[1]);
-            kill(process_table[i].pid, SIGSTOP);
-            process_table[i].state = READY;
-            enqueue_ready(i);
-            printf("KERNEL: Criou APP %d (PID %d) e colocou na fila de prontos.\n", i + 1, process_table[i].pid);
+            close(tabela_processos[i].pipe_fd[1]);
+            kill(tabela_processos[i].pid, SIGSTOP);
+            tabela_processos[i].estado = PRONTO;
+            enfileirar_pronto(i);
+            printf("KERNEL: Criou APP %d (PID %d) e colocou na fila de prontos.\n", i + 1, tabela_processos[i].pid);
         }
     }
     
     sleep(1);
     printf("\nKERNEL: Iniciando escalonamento.\n");
-    scheduler();
+    escalonador();
 
     while(1) {
         pause();
