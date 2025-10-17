@@ -5,10 +5,8 @@
 #include <sys/wait.h>
 #include <string.h>
 
-//O número de aplicações vai ser passado na linha de comando
 int num_aplicacoes;
 
-// Estados de um processo
 typedef enum { PRONTO, EXECUTANDO, BLOQUEADO, TERMINADO } EstadoProcesso;
 
 typedef struct {
@@ -35,7 +33,8 @@ int indice_app_executando = -1;
 void escalonador();
 void verificar_termino_total();
 
-// --- Funções de Fila ---
+// Funções de Fila e Handlers
+
 void enfileirar_pronto(int indice_app) {
     if (cont_fila_prontos < num_aplicacoes) {
         fila_prontos[cauda_fila_prontos] = indice_app;
@@ -68,8 +67,6 @@ int desenfileirar_bloqueado() {
     }
     return -1;
 }
-
-// --- Handlers de Sinais ---
 
 void handler_termino_filho(int signum) {
     int status;
@@ -153,7 +150,6 @@ void verificar_termino_total() {
     if (cont_terminados == num_aplicacoes) {
         printf("\nKERNEL: Todos os processos de aplicação terminaram. Encerrando simulação.\n");
         kill(pid_controlador_interrupcao, SIGKILL);
-        // <<-- MUDANÇA: Liberando memória antes de sair -->>
         free(tabela_processos);
         free(fila_prontos);
         free(fila_bloqueados);
@@ -161,40 +157,60 @@ void verificar_termino_total() {
     }
 }
 
-// --- Função Principal ---
+
+// Função Principal
 int main(int argc, char *argv[]) {
     // Validação dos argumentos
-    if (argc < 2) {
-        fprintf(stderr, "Uso: %s <num_apps> <tempo_syscall_app1> <tempo_syscall_app2> ...\n", argv[0]);
-        fprintf(stderr, "Exemplo: %s 3 2 0 5  (3 apps, syscalls em PC=2, nenhuma, PC=5)\n", argv[0]);
+    if (argc != 2) {
+        fprintf(stderr, "Uso: %s <arquivo_de_cenario>\n", argv[0]);
         exit(1);
     }
 
-    num_aplicacoes = atoi(argv[1]);
-
-    if (num_aplicacoes <= 0 || argc != num_aplicacoes + 2) {
-        fprintf(stderr, "Erro: Número de argumentos inválido para %d aplicações.\n", num_aplicacoes);
-        fprintf(stderr, "Uso: %s <num_apps> <tempo_syscall_app1> <tempo_syscall_app2> ...\n", argv[0]);
+    // Abrir o arquivo de caso de teste
+    FILE *arquivo_cenario = fopen(argv[1], "r");
+    if (arquivo_cenario == NULL) {
+        perror("Erro ao abrir o arquivo de cenário");
         exit(1);
     }
 
+    // Ler o número de aplicações
+    if (fscanf(arquivo_cenario, "%d", &num_aplicacoes) != 1 || num_aplicacoes <= 0) {
+        fprintf(stderr, "Erro: formato de arquivo inválido ou número de aplicações nulo/negativo.\n");
+        fclose(arquivo_cenario);
+        exit(1);
+    }
+    
     // Alocação dinâmica da memória
     tabela_processos = (BCP*) malloc(num_aplicacoes * sizeof(BCP));
     fila_prontos = (int*) malloc(num_aplicacoes * sizeof(int));
     fila_bloqueados = (int*) malloc(num_aplicacoes * sizeof(int));
+    int* tempos_syscall = (int*) malloc(num_aplicacoes * sizeof(int)); // Array temporário
 
-    if (tabela_processos == NULL || fila_prontos == NULL || fila_bloqueados == NULL) {
+    if (tabela_processos == NULL || fila_prontos == NULL || fila_bloqueados == NULL || tempos_syscall == NULL) {
         perror("Falha ao alocar memória");
+        fclose(arquivo_cenario);
         exit(1);
     }
+
+    // Ler os tempos de syscall para cada aplicação
+    for (int i = 0; i < num_aplicacoes; i++) {
+        if (fscanf(arquivo_cenario, "%d", &tempos_syscall[i]) != 1) {
+            fprintf(stderr, "Erro: não foi possível ler o tempo de syscall para a aplicação %d.\n", i + 1);
+            fclose(arquivo_cenario);
+            exit(1);
+        }
+    }
+    fclose(arquivo_cenario); // Fecha o arquivo assim que terminar de ler
+
+    printf("KERNEL (PID %d): Iniciando sistema para %d aplicações do arquivo '%s'...\n", getpid(), num_aplicacoes, argv[1]);
     
-    printf("KERNEL (PID %d): Iniciando sistema para %d aplicações...\n", getpid(), num_aplicacoes);
-    
+    // Configuração dos handlers
     signal(SIGUSR1, handler_irq0);
     signal(SIGUSR2, handler_syscall);
     signal(SIGALRM, handler_irq1);
     signal(SIGCHLD, handler_termino_filho);
 
+    // Criação do InterController
     pid_controlador_interrupcao = fork();
     if (pid_controlador_interrupcao == 0) {
         char pid_kernel_str[10];
@@ -203,6 +219,7 @@ int main(int argc, char *argv[]) {
         perror("execlp controller"); exit(1);
     }
 
+    // Criação das Aplicações
     for (int i = 0; i < num_aplicacoes; i++) {
         pipe(tabela_processos[i].pipe_fd);
         tabela_processos[i].pid = fork();
@@ -210,13 +227,12 @@ int main(int argc, char *argv[]) {
         if (tabela_processos[i].pid == 0) {
             close(tabela_processos[i].pipe_fd[0]);
             
-            char id_str[3], pid_kernel_str[10], pipe_str[10];
-            // O tempo de syscall vem de argv[i + 2]
-            char* tempo_syscall_str = argv[i + 2];
+            char id_str[3], pid_kernel_str[10], pipe_str[10], tempo_syscall_str[10];
             
             sprintf(id_str, "%d", i + 1);
             sprintf(pid_kernel_str, "%d", getppid());
             sprintf(pipe_str, "%d", tabela_processos[i].pipe_fd[1]);
+            sprintf(tempo_syscall_str, "%d", tempos_syscall[i]);
 
             execlp("./application", "application", id_str, pid_kernel_str, pipe_str, tempo_syscall_str, NULL);
             
@@ -230,6 +246,8 @@ int main(int argc, char *argv[]) {
         }
     }
     
+    free(tempos_syscall);
+
     sleep(1);
     printf("\nKERNEL: Iniciando escalonamento.\n");
     escalonador();
@@ -238,5 +256,5 @@ int main(int argc, char *argv[]) {
         pause();
     }
 
-    return 0; // Se der certo, nunca chega aqui
+    return 0;
 }

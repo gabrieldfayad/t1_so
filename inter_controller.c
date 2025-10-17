@@ -12,7 +12,7 @@ void handler_iniciar_es(int signum) {
     if (fork() == 0) {
         sleep(3); // Operação de E/S leva 3 segundos
         printf("InterController: E/S concluída. Enviando IRQ1.\n");
-        kill(pid_kernel, SIGALRM); // Envia IRQ1 (I/O Done)
+        kill(pid_kernel, SIGALRM); // Envia IRQ1
         exit(0);
     }
 }
@@ -26,10 +26,9 @@ int main(int argc, char *argv[]) {
 
     printf("InterController (PID %d): Iniciado. Alvo: KernelSim (PID %d).\n", getpid(), pid_kernel);
 
-    // Configura o handler para receber o pedido de início de E/S do KernelSim
     signal(SIGUSR2, handler_iniciar_es);
 
-    // Loop principal para enviar o sinal de timeslice (IRQ0) a cada 1s
+    // enviar o sinal de timeslice (IRQ0) a cada 1s
     while (1) {
         sleep(1);
         kill(pid_kernel, SIGUSR1);
